@@ -24,7 +24,7 @@ import { basename, dirname, join } from "node:path";
  */
 export function deriveSubagentSessionDir(
   parentSessionFile: string | undefined,
-  fallbackDir: string,
+  fallbackDir?: string,
 ): string {
   if (parentSessionFile) {
     const dir = dirname(parentSessionFile);
@@ -34,7 +34,11 @@ export function deriveSubagentSessionDir(
 
   // Fallback: use a temp directory keyed by uid and cwd so different
   // projects don't collide when the parent session is not persisted.
-  const encoded = fallbackDir.replace(/[/\\]/g, "-").replace(/^[A-Za-z]:-/, "").replace(/^-+/, "");
-  const root = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`);
+  const fallback = fallbackDir ?? process.cwd();
+  const encoded = fallback.replace(/[/\\]/g, "-").replace(/^[A-Za-z]:-/, "").replace(/^-+/, "");
+  const uid = typeof process.getuid === "function"
+    ? process.getuid()
+    : (process.env.USERNAME ?? "unknown");
+  const root = join(tmpdir(), `pi-subagents-${uid}`);
   return join(root, encoded, "tasks");
 }

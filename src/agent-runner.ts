@@ -970,8 +970,8 @@ export async function runAgent(
   // this isolation strategy must be revisited.
   //
   // Multi-level nesting is intentional: a child that itself spawns will
-  // produce <parent>/tasks/<child>/tasks/<grandchild>, mirroring the agent
-  // tree. This does not affect /resume.
+  // produce <parent-dir>/<parent-basename>/tasks/<child-basename>/tasks/<grandchild>.jsonl,
+  // mirroring the agent tree. This does not affect /resume.
   // ──────────────────────────────────────────────────────────────────────────
   const currentParentSessionFile = ctx.sessionManager?.getSessionFile?.();
   const baseSessionDir = configuredSessionDir ?? defaultSessionDir;
