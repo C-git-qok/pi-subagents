@@ -6,11 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tintinweb/pi-subagents.git"
+    "url": "https://github.com/C-git-qok/pi-subagents.git"
   },
-  "homepage": "https://github.com/tintinweb/pi-subagents#readme",
+  "homepage": "https://github.com/C-git-qok/pi-subagents#readme",
   "bugs": {
-    "url": "https://github.com/tintinweb/pi-subagents/issues"
+    "url": "https://github.com/C-git-qok/pi-subagents/issues"
   },
   "publishConfig": {
     "access": "public"
