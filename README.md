@@ -291,7 +291,7 @@ parentSession metadata
 | `@handle` Resume | ⚠️ 待验证 | session 持久化逻辑未改，但新存储位置需要恢复链实测 |
 | `rememberAgents`      | ✅  | 持久化逻辑不变，建议保持开启                    |
 | `/resume`             | ✅  | 顶层列表不再显示 child session            |
-| `pi-tasks`            | ✅  | 不修改 Task lifecycle / RPC contract |
+| `pi-tasks` | ✅ | 本 fork 未修改 Task lifecycle / RPC contract；建议做一次 TaskExecute 回归验证 |
 | Cross-extension RPC   | ✅  | 本 fork 不改变 RPC 接口                 |
 
 ---
