@@ -394,7 +394,7 @@ https://github.com/C-git-qok/pi-subagents
 安装：
 
 ```bash
-pi install github:C-git-qok/pi-subagents
+pi install git:github.com/C-git-qok/pi-subagents
 ```
 
 如需固定版本，建议使用 tag：
