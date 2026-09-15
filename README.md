@@ -400,7 +400,7 @@ pi install git:github.com/C-git-qok/pi-subagents
 如需固定版本，建议使用 tag：
 
 ```bash
-pi install github:C-git-qok/pi-subagents@v0.19.0-oak.1
+pi install git:github.com/C-git-qok/pi-subagents@v0.19.0-oak.1
 ```
 
 这样可以避免主分支后续变化影响当前环境。
