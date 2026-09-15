@@ -285,7 +285,7 @@ parentSession metadata
 | Workflow              | ✅  | 未修改                               |
 | Nested Subagents      | ✅  | 保持 parent lineage，session 按树形目录隔离 |
 | Session Resume        | ✅  | 持久化 session 仍然保留                  |
-| `@handle` Resume      | ✅  | 继续通过 subagent handle 恢复           |
+| `@handle` Resume | ⚠️ 待验证 | session 持久化逻辑未改，但新存储位置需要恢复链实测 |
 | `rememberAgents`      | ✅  | 持久化逻辑不变，建议保持开启                    |
 | `/resume`             | ✅  | 顶层列表不再显示 child session            |
 | `pi-tasks`            | ✅  | 不修改 Task lifecycle / RPC contract |
