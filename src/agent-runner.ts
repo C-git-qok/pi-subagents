@@ -18,6 +18,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+import { deriveSubagentSessionDir } from "./session-dir.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
@@ -959,19 +960,39 @@ export async function runAgent(
   // which `rememberAgents` supplies for top-level agents only. Same precedence
   // as `outputTranscript`.
   const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
+  // For child (nested) sessions, derive a subdirectory under the parent session's
+  // basename so they don't clutter the main session list in /resume.
+  // Layout: <parent-dir>/<parent-basename>/tasks/
+  //
+  // Depends on Pi's shallow session discovery — child sessions are stored
+  // outside the top-level directory so /resume (which scans only *.jsonl in
+  // the flat dir) never sees them. If Pi switches to recursive discovery,
+  // this isolation strategy must be revisited.
+  //
+  // Multi-level nesting is intentional: a child that itself spawns will
+  // produce <parent-dir>/<parent-basename>/tasks/<child-basename>/tasks/<grandchild>.jsonl,
+  // mirroring the agent tree. This does not affect /resume.
+  // ──────────────────────────────────────────────────────────────────────────
+  const currentParentSessionFile = ctx.sessionManager?.getSessionFile?.();
+  const baseSessionDir = configuredSessionDir ?? defaultSessionDir;
+  // Any spawn with a parent session gets the tasks/ subdirectory treatment.
+  // This covers both top-level Agent spawns AND nested child-of-child spawns.
+  const effectiveSessionDir = currentParentSessionFile
+    ? deriveSubagentSessionDir(currentParentSessionFile, baseSessionDir)
+    : baseSessionDir;
   const sessionManager = options.resumeSessionFile
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
     // apply. `sessionDir` still matters for a later /new or /branch off it.
-    ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
+    ? SessionManager.open(options.resumeSessionFile, baseSessionDir)
     : persistSession
-      ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
+      ? SessionManager.create(effectiveCwd, effectiveSessionDir, {
           // Optional metadata — it only nests the subagent under its spawner in
           // `/resume`. Until `rememberAgents` this ran solely for the rare
           // `persist_session: true` agent; now it runs for every spawn, so a
           // context without a session manager (a bare programmatic ctx) must
           // still persist rather than take the whole spawn down.
-          parentSession: ctx.sessionManager?.getSessionFile?.(),
+          parentSession: currentParentSessionFile,
         })
       : SessionManager.inMemory(effectiveCwd);
 
