@@ -264,7 +264,9 @@ describe("agent-runner final output capture", () => {
     expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/mock/agent-dir", { projectTrusted: true });
     // Same claim as before `rememberAgents` flipped the default — the effective
     // cwd reaches the session manager — now via the persistent constructor.
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp/worktree", undefined, expect.anything());
+    // fork: session isolation — session dir derives to <parent>/tasks/ instead of flat.
+    // join() keeps the expectation platform-correct (node:path yields "\" on win32).
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp/worktree", join("/sessions", "parent", "tasks"), expect.anything());
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/tmp/worktree",
       agentDir: "/mock/agent-dir",
@@ -1022,9 +1024,10 @@ describe("agent-runner session persistence", () => {
     await runAgent(ctx, "Explore", "go", { pi });
 
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
+    // fork: session isolation — session dir derives to <parent-basename>/tasks/.
     expect(sessionManagerCreate).toHaveBeenCalledWith(
       "/tmp",
-      "/normal/pi/sessions",
+      join("/sessions", "parent", "tasks"),
       { parentSession: "/sessions/parent.jsonl" },
     );
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
@@ -1042,9 +1045,10 @@ describe("agent-runner session persistence", () => {
 
     await runAgent(ctx, "Explore", "go", { pi, cwd: "/repo" });
 
+    // fork: session isolation — parent session wins over configured sessionDir for derivation.
     expect(sessionManagerCreate).toHaveBeenCalledWith(
       "/repo",
-      "/repo/.seams/pi-sessions/seam-plan-reviewer",
+      join("/sessions", "parent", "tasks"),
       { parentSession: "/sessions/parent.jsonl" },
     );
   });
