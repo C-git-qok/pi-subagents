@@ -4,7 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import {
@@ -28,7 +28,7 @@ import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
-import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
+import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./prompts.js";
 import { deriveSubagentSessionDir } from "./session-dir.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
@@ -80,11 +80,12 @@ export function extensionCanonicalName(extPath: string): string {
  *   - a `node_modules` directory: a package never spans one (it's where OTHER
  *     packages live), so reaching it means we've climbed out of the package —
  *     stop before reading a consumer's or parent package's manifest.
- * The name is then taken only when that root's `pi.extensions` manifest actually
- * lists this entry. That "declares this entry" check is deliberate: our own test
- * fixtures live under this repo, whose root manifest declares `./src/index.ts`
- * as `@tintinweb/pi-subagents`, so a looser rule would misattribute every
- * co-located file to `pi-subagents`.
+ * The name is then taken only when that root's `pi.extensions` manifest declares
+ * this entry, either as the file itself or as a directory containing it (pi
+ * expands `"./dist"` to `dist/index.js`). That "declares this entry" check is
+ * deliberate: our own test fixtures live under this repo, whose root manifest
+ * declares `./src/index.ts` as `@tintinweb/pi-subagents`, so a looser rule would
+ * misattribute every co-located file to `pi-subagents`.
  */
 function extensionPackageName(extPath: string): string | undefined {
   // `builtin:<name>` names no file; climbing from it would read the process cwd's manifest.
@@ -108,7 +109,15 @@ function extensionPackageName(extPath: string): string | undefined {
     if (
       typeof pkg.name === "string" &&
       Array.isArray(entries) &&
-      entries.some((e) => typeof e === "string" && resolve(dir, e) === entry)
+      entries.some((e) => {
+        if (typeof e !== "string") return false;
+        // A declaration may name a directory (`"./dist"`) that pi resolves to
+        // `dist/index.js`, so an entry belongs to this package when it equals the
+        // declaration or lives underneath it. The `${sep}` boundary keeps that
+        // prefix test platform-correct (`dist-v2` never matches `"./dist"`).
+        const declared = resolve(dir, e);
+        return declared === entry || entry.startsWith(`${declared}${sep}`);
+      })
     ) {
       const short = pkg.name.startsWith("@") ? pkg.name.slice(pkg.name.indexOf("/") + 1) : pkg.name;
       return short.toLowerCase();
@@ -210,6 +219,23 @@ export function parseExtSelectors(entries: string[]): {
   return { extNames, narrowing };
 }
 
+/** pi's MCP resource tools, which it counts as MCP tools alongside `mcp__<server>__<tool>`. */
+const MCP_RESOURCE_TOOL_NAMES = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+
+/** The tools that reach `codemode`/`deferred` MCP tools: neither is declared to the model. */
+const MCP_BRIDGE_TOOL_NAMES = new Set(["codemode", "tool_search"]);
+
+const isMcpToolName = (name: string) => name.startsWith("mcp__") || MCP_RESOURCE_TOOL_NAMES.has(name);
+
+/** Whether `name` matches one of the `tools:` `mcp__` entries: an exact name or a `*` pattern. */
+function matchesToolPattern(name: string, patterns: readonly string[]): boolean {
+  return patterns.some((p) =>
+    p.includes("*")
+      ? new RegExp(`^${p.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`).test(name)
+      : p === name,
+  );
+}
+
 /**
  * Keep a subagent's tool scope correct as extensions register tools over time.
  *
@@ -243,6 +269,8 @@ export function installExtensionToolScope(
     disallowedSet: Set<string> | undefined;
     extNames: Set<string>;
     narrowing: Map<string, Set<string>>;
+    /** Bare `mcp__` entries from `tools:`; undefined leaves MCP tools to the rules above. */
+    mcpToolPatterns: string[] | undefined;
     /**
      * Injected `customTools` to keep active regardless of the built-in list.
      *
@@ -256,7 +284,8 @@ export function installExtensionToolScope(
     nestedCallGate: NestedCallGate;
   },
 ): void {
-  const { loader, toolNames, disallowedSet, extNames, narrowing, readmitToolNames, nestedCallGate } = ctx;
+  const { loader, toolNames, disallowedSet, extNames, narrowing, mcpToolPatterns, readmitToolNames, nestedCallGate } =
+    ctx;
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
@@ -277,6 +306,20 @@ export function installExtensionToolScope(
         keep.add(name);
       }
     }
+    // Bare `mcp__` entries, as in pi's `--tools`: only matching MCP tools stay, from
+    // whichever extension serves them (pi's MCP or an adapter), even one the `ext:`
+    // opt-in left out — and so do the bridges that reach them.
+    if (mcpToolPatterns) {
+      for (const name of keep) {
+        if (isMcpToolName(name) && !matchesToolPattern(name, mcpToolPatterns)) keep.delete(name);
+      }
+      for (const extension of loader.getExtensions().extensions) {
+        for (const name of extension.tools.keys()) {
+          if (disallowedSet?.has(name)) continue;
+          if (MCP_BRIDGE_TOOL_NAMES.has(name) || matchesToolPattern(name, mcpToolPatterns)) keep.add(name);
+        }
+      }
+    }
     for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
     // Injected tools are legitimately active for this agent — re-admit them so
     // the renarrow keeps them in the active set and beforeToolCall doesn't
@@ -286,10 +329,15 @@ export function installExtensionToolScope(
     return keep;
   };
 
-  // Names this agent selects explicitly: its built-ins, injected tools, and
-  // `ext:foo/bar` narrowings. pi activates a named tool even when it is
+  // Names this agent selects explicitly: its built-ins, injected tools, `ext:foo/bar`
+  // narrowings and exact `mcp__` entries. pi activates a named tool even when it is
   // `defaultActive: false`, as `--tools` does.
-  const named = new Set([...toolNames, ...readmitToolNames, ...[...narrowing.values()].flatMap((s) => [...s])]);
+  const named = new Set([
+    ...toolNames,
+    ...readmitToolNames,
+    ...[...narrowing.values()].flatMap((s) => [...s]),
+    ...(mcpToolPatterns ?? []).filter((p) => !p.includes("*")),
+  ]);
 
   // Activate what pi itself would: only tools declared to the model (`direct`/
   // `model-only` exposure), and of those only named ones or ones not opted out
@@ -730,6 +778,44 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
+/**
+ * Open an agent's saved session to continue it — or a copy of it, when the
+ * session belongs to another parent.
+ *
+ * pi's `/fork` and `/clone` copy the parent's entries, saved agent records
+ * included, so two parent sessions can each resume the same agent. Appending
+ * both continuations to one file would interleave two histories in it. The
+ * child's header names the parent that spawned it; a resume from any other
+ * parent forks the child alongside — into this parent's `tasks/` directory, like
+ * any other child it spawns. (The copy's header still names the file it was forked
+ * from: pi's `forkFrom` reads only `options.id`, not `options.parentSession`.)
+ * A header with no parent (a child
+ * spawned from a context without a session file) gives nothing to compare,
+ * so it opens in place as before.
+ */
+function reopenSession(
+  file: string,
+  parentSessionFile: string | undefined,
+  sessionDir: string | undefined,
+  forkSessionDir: string | undefined,
+): SessionManager {
+  const opened = SessionManager.open(file, sessionDir);
+  const owner = opened.getHeader()?.parentSession;
+  if (owner === undefined || owner === parentSessionFile) return opened;
+  // A cross-parent resume CREATES a file, so it is a spawn, not just an open:
+  // the copy goes to the derived tasks/ directory like any other child. Passing
+  // the base dir here (as the fork did before multi-parent resume existed) put a
+  // subagent session straight back into /resume — the one thing this fork exists
+  // to prevent. `sessionDir` stays the base dir above: opening the original file
+  // in place must not move its later /new and /branch into tasks/.
+  //
+  // `options.parentSession` states the intent, but pi's forkFrom reads only
+  // `options.id` (1.1.0 through 1.5.x): the copy's header still names the file
+  // it was forked from. Do not read that header as "who owns this copy" — see
+  // FORK.md.
+  return SessionManager.forkFrom(file, opened.getCwd(), forkSessionDir, { parentSession: parentSessionFile });
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -747,8 +833,9 @@ export async function runAgent(
 
   const env = await detectEnv(options.pi, effectiveCwd);
 
-  // Get parent system prompt for append-mode agents
-  const parentSystemPrompt = ctx.getSystemPrompt();
+  // Get parent system prompt for append-mode agents, without the sections the
+  // child session renders itself (skills, cwd, extension sections).
+  const parentSystemPrompt = inheritableParentPrompt(ctx.getSystemPrompt(), ctx.cwd);
 
   // Build prompt extras (memory, skill preloading)
   const extras: PromptExtras = {};
@@ -794,6 +881,46 @@ export async function runAgent(
       if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
       extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
     }
+  }
+
+  const disallowedSet = agentConfig?.disallowedTools
+    ? new Set(agentConfig.disallowedTools)
+    : undefined;
+
+  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
+  // set `allowed_subagents` and a nestedRuntime was provided — and never when
+  // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
+  // scoping below re-admits them explicitly (registry deny + active-set narrow).
+  // Decided before the prompt is built, which says so when the agent delegates.
+  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
+  // At (or past) the cap this agent can never spawn, so it can never own a child
+  // to fetch from or steer either — inject nothing rather than three tools whose
+  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
+  // "nesting off" instead of "nesting always fails".
+  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
+    ? options.nestedRuntime
+    : undefined;
+  // A workflow agent running the built-in general-purpose (what an untyped
+  // agent() gets) does not delegate: Claude Code's `workflow-subagent` drops the
+  // Agent tool, and the workflow script is what fans out. A custom agent's own
+  // `allowed_subagents` still applies.
+  const builtinInWorkflow = options.workflow === true && agentConfig?.isDefault === true;
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated && !builtinInWorkflow
+    ? createNestedSubagentTools({
+        manager: nestedRuntime.manager,
+        pi: options.pi,
+        parentAgentId: nestedRuntime.parentAgentId,
+        depth: nestedRuntime.depth,
+        maxSubagentDepth: effectiveMaxDepth,
+        allowedSubagents: agentConfig.allowedSubagents,
+        configCwd,
+      })
+    : [];
+  const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
+  // Only where the built-in general-purpose can actually spawn — not in a
+  // workflow, at the depth cap, isolated, or with `Agent` disallowed.
+  if (agentConfig?.isDefault && nestedToolNames.has("Agent") && !disallowedSet?.has("Agent")) {
+    extras.delegationGuideline = true;
   }
 
   // Build system prompt from agent config
@@ -940,6 +1067,13 @@ export async function runAgent(
       }
     }
   }
+  // MCP tools come from extensions, so with none loaded these entries cannot match.
+  if (agentConfig?.mcpToolPatterns && noExtensions) {
+    options.onToolActivity?.({
+      type: "end",
+      toolName: `tools-error:${agentConfig.mcpToolPatterns.join(", ")} requested by agent "${type}" need extensions, but it loads none`,
+    });
+  }
 
   // A subagent spawns mid-task, so a bad `extensions:`/`ext:` entry warns rather
   // than aborts. Two distinct misconfigurations to catch:
@@ -999,37 +1133,11 @@ export async function runAgent(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
 
-  // Resolve thinking level: explicit option > agent config > undefined (inherit)
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
-
-  const disallowedSet = agentConfig?.disallowedTools
-    ? new Set(agentConfig.disallowedTools)
-    : undefined;
-
-  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
-  // set `allowed_subagents` and a nestedRuntime was provided — and never when
-  // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
-  // scoping below re-admits them explicitly (registry deny + active-set narrow).
-  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
-  // At (or past) the cap this agent can never spawn, so it can never own a child
-  // to fetch from or steer either — inject nothing rather than three tools whose
-  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
-  // "nesting off" instead of "nesting always fails".
-  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
-    ? options.nestedRuntime
-    : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated
-    ? createNestedSubagentTools({
-        manager: nestedRuntime.manager,
-        pi: options.pi,
-        parentAgentId: nestedRuntime.parentAgentId,
-        depth: nestedRuntime.depth,
-        maxSubagentDepth: effectiveMaxDepth,
-        allowedSubagents: agentConfig.allowedSubagents,
-        configCwd,
-      })
-    : [];
-  const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
+  // Resolve thinking level: explicit option > agent config > parent session level.
+  // Without the parent step, an unset level falls through to pi's
+  // defaultThinkingLevel (e.g. "max") instead of matching the spawning session.
+  // Same idiom as mention-clone.ts.
+  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel;
 
   // The `agent({ schema })` contract: this child reports its answer by calling
   // StructuredOutput, and `structuredJson` below is what the caller reads. The
@@ -1052,6 +1160,40 @@ export async function runAgent(
     ...[...nestedToolNames].filter(name => !disallowedSet?.has(name)),
     ...structuredToolNames,
   ]);
+
+  // As in Claude Code, refuse an agent whose `tools:` list resolved to nothing: with
+  // no tool it can only narrate calls it cannot make. Extension tools register after
+  // spawn (MCP once its servers connect), so they count as possible whenever an
+  // extension they could come from loaded, or any `mcp__` entry can reach a bridge.
+  const loadedNames = new Set(
+    loader
+      .getExtensions()
+      .extensions.filter((e) => e.path !== `<inline:${SCOPE_GATE_NAME}>`)
+      .flatMap((e) => extensionCanonicalNames(e.path)),
+  );
+  const unrecognized = agentConfig?.builtinToolNames?.filter((n) => !BUILTIN_TOOL_NAMES.includes(n)) ?? [];
+  const unmatched = [...extNames].filter((n) => !loadedNames.has(n));
+  // `extensions: false` and `isolated` load nothing, so `loadedNames` is empty then.
+  const extensionToolsPossible =
+    loadedNames.size > 0 &&
+    (extNames.size === 0 || unmatched.length < extNames.size || !!agentConfig?.mcpToolPatterns);
+  if (
+    (unrecognized.length > 0 || unmatched.length > 0) &&
+    toolNames.every((n) => !BUILTIN_TOOL_NAMES.includes(n) || disallowedSet?.has(n)) &&
+    readmitToolNames.size === 0 &&
+    !extensionToolsPossible
+  ) {
+    const reasons = [
+      unrecognized.length > 0 ? `unrecognized [${unrecognized.join(", ")}]` : "",
+      unmatched.length > 0
+        ? `recognized but matched no tools in this session [${unmatched.map((n) => `ext:${n}`).join(", ")}]`
+        : "",
+    ].filter(Boolean);
+    throw new Error(
+      `Agent '${type}' would be spawned with zero tools — refusing. Its tools list resolved to nothing: ` +
+        `${reasons.join("; ")}. Fix the agent's tools frontmatter or pass a different subagent_type.`,
+    );
+  }
 
   // ─── Tool scoping ───────────────────────────────────────────────────────
   //
@@ -1137,18 +1279,18 @@ export async function runAgent(
   // produce <parent-dir>/<parent-basename>/tasks/<child-basename>/tasks/<grandchild>.jsonl,
   // mirroring the agent tree. This does not affect /resume.
   // ──────────────────────────────────────────────────────────────────────────
-  const currentParentSessionFile = ctx.sessionManager?.getSessionFile?.();
+  const parentSessionFile = ctx.sessionManager?.getSessionFile?.();
   const baseSessionDir = configuredSessionDir ?? defaultSessionDir;
   // Any spawn with a parent session gets the tasks/ subdirectory treatment.
   // This covers both top-level Agent spawns AND nested child-of-child spawns.
-  const effectiveSessionDir = currentParentSessionFile
-    ? deriveSubagentSessionDir(currentParentSessionFile, baseSessionDir)
+  const effectiveSessionDir = parentSessionFile
+    ? deriveSubagentSessionDir(parentSessionFile, baseSessionDir)
     : baseSessionDir;
   const sessionManager = options.resumeSessionFile
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
     // apply. `sessionDir` still matters for a later /new or /branch off it.
-    ? SessionManager.open(options.resumeSessionFile, baseSessionDir)
+    ? reopenSession(options.resumeSessionFile, parentSessionFile, baseSessionDir, effectiveSessionDir)
     : persistSession
       ? SessionManager.create(effectiveCwd, effectiveSessionDir, {
           // Optional metadata — it only nests the subagent under its spawner in
@@ -1156,7 +1298,7 @@ export async function runAgent(
           // `persist_session: true` agent; now it runs for every spawn, so a
           // context without a session manager (a bare programmatic ctx) must
           // still persist rather than take the whole spawn down.
-          parentSession: currentParentSessionFile,
+          parentSession: parentSessionFile,
         })
       : SessionManager.inMemory(effectiveCwd);
 
@@ -1223,6 +1365,7 @@ export async function runAgent(
       disallowedSet,
       extNames,
       narrowing,
+      mcpToolPatterns: isolated ? undefined : agentConfig?.mcpToolPatterns,
       readmitToolNames,
       nestedCallGate,
     });
@@ -1235,9 +1378,11 @@ export async function runAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  // Build the effective prompt: optionally prepend parent context
+  // Build the effective prompt: optionally prepend parent context. Only for a
+  // fresh conversation — a reopened one already holds its history, and a live
+  // resume never re-sends the parent's either.
   let effectivePrompt = prompt;
-  if (options.inheritContext) {
+  if (options.inheritContext && !options.resumeSessionFile) {
     const parentContext = buildParentContext(ctx);
     if (parentContext) {
       effectivePrompt = parentContext + prompt;

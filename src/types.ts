@@ -14,6 +14,15 @@ export type SubagentType = string;
 /** Names of the three embedded default agents. */
 export const DEFAULT_AGENT_NAMES = ["general-purpose", "Explore", "Plan"] as const;
 
+/**
+ * Advertised thinking levels, ordered to mirror pi-ai's EXTENDED_THINKING_LEVELS
+ * (`off` + every `ThinkingLevel`). Single source for the Agent tool description,
+ * the generated-agent template, and the `/agents` wizard so these lists can't
+ * drift behind pi again (#147). Availability of any level still depends on the
+ * host pi version and the selected model — pi clamps unsupported levels down.
+ */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
 /** Memory scope for persistent agent memory. */
 export type MemoryScope = "user" | "project" | "local";
 
@@ -42,6 +51,9 @@ export interface AgentConfig {
   /** Raw `ext:` selector entries from the `tools:` CSV, e.g. ["ext:foo", "ext:bar/x"].
    * Presence of any entry flips extension tools to an explicit allowlist. */
   extSelectors?: string[];
+  /** Bare `mcp__` entries from the `tools:` CSV (exact names or `*` patterns), as in
+   * pi's `--tools`: MCP tools are narrowed to the matching ones. */
+  mcpToolPatterns?: string[];
   /** Tool denylist — these tools are removed even if `builtinToolNames` or extensions include them. */
   disallowedTools?: string[];
   /** true = inherit all, string[] = only listed, false = none */
@@ -147,6 +159,8 @@ export interface AgentTombstone {
   /** Always set — a record with no session file is never tombstoned. */
   sessionFile: string;
   completedAt: number;
+  /** The agent's work lived in a worktree that is now gone; reopening is refused. */
+  worktreeLost?: boolean;
 }
 
 /**
@@ -244,8 +258,18 @@ export interface AgentRecord {
    * Lifetime usage breakdown, accumulated via `message_end` events. Survives
    * compaction. Total = input + output + cacheWrite (cacheRead deliberately
    * excluded — see issue #38). Initialized to zeros at spawn.
+   *
+   * Includes every descendant's spend: `nested-tools.ts` folds a nested
+   * child's turns into all its ancestors, because the child itself is hidden
+   * from the surfaces that read this field.
    */
   lifetimeUsage: LifetimeUsage;
+  /**
+   * This agent's own turns only — `lifetimeUsage` minus its descendants. What
+   * the fleet list shows, since it gives nested children rows of their own and
+   * the rolled-up figure would count their spend twice.
+   */
+  ownUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /**

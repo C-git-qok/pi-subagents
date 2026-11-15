@@ -41,3 +41,15 @@ test/perf/.results/
 # Pi internal files
 progress.md
 CLAUDE.md
+
+# ── fork additions (append-only; see FORK.md) ──────────────────────────────
+# Local secrets and env overrides — never commit
+.env
+.env.*
+!.env.example
+.npmrc
+
+# Packaging artifacts (`npm pack`, local tarballs)
+*.tgz
+*.zip
+
